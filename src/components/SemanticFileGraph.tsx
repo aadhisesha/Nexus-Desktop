@@ -147,18 +147,16 @@ export function SemanticFileGraph({
               (activeSet.has(a.id) && activeSet.has(b.id)) ||
               (showMatch && (a.id === MATCH_ID || b.id === MATCH_ID));
             return (
-              <motion.line
+              <line
                 key={i}
                 x1={a.x}
                 y1={a.y}
                 x2={b.x}
                 y2={b.y}
                 strokeWidth={hot ? 1.1 : 0.7}
-                animate={{
-                  stroke: hot ? "var(--brand)" : "var(--graph)",
-                  opacity: hot ? 0.7 : 0.16,
-                }}
-                transition={{ duration: 0.5 }}
+                stroke={hot ? "var(--brand)" : "var(--graph)"}
+                opacity={hot ? 0.7 : 0.16}
+                className="transition-all duration-300"
               />
             );
           })}
@@ -168,46 +166,26 @@ export function SemanticFileGraph({
           const active = activeSet.has(n.id);
           const match = showMatch && n.id === MATCH_ID;
           return (
-            <motion.g
+            <g
               key={n.id}
-              initial={{ opacity: 0 }}
-              animate={{
-                opacity: match ? 1 : active ? 0.85 : 0.2,
-                x: n.drift ? [n.x, n.x + 6, n.x] : n.x,
-                y: n.drift ? [n.y, n.y - 5, n.y] : n.y,
-                scale: match ? 1.5 * n.s : active ? 1.15 * n.s : n.s,
-              }}
-              transition={{
-                opacity: { duration: 0.5 },
-                scale: { type: "spring", stiffness: 200, damping: 16 },
-                x: n.drift ? { duration: 10 + (n.id % 5), repeat: Infinity, ease: "easeInOut" } : { duration: 0 },
-                y: n.drift ? { duration: 12 + (n.id % 4), repeat: Infinity, ease: "easeInOut" } : { duration: 0 },
+              transform={`translate(${n.x}, ${n.y}) scale(${match ? 1.4 * n.s : active ? 1.15 * n.s : n.s})`}
+              className="transition-all duration-300 ease-out"
+              style={{
+                opacity: match ? 1 : active ? 0.85 : 0.18,
               }}
             >
               <Glyph n={n} active={active} match={match} />
               {(active || match) && (
-                <motion.circle
+                <circle
                   r={16}
                   fill="none"
                   stroke="var(--brand)"
                   strokeWidth={0.8}
                   strokeDasharray={match ? "0" : "2 4"}
-                  initial={{ opacity: 0, scale: 0.6 }}
-                  animate={{ opacity: match ? 0.8 : 0.5, scale: 1 }}
+                  className="animate-pulse"
                 />
               )}
-              {match &&
-                [0, 1].map((k) => (
-                  <motion.path
-                    key={k}
-                    d="M0 -4 L1 -1 L4 0 L1 1 L0 4 L-1 1 L-4 0 L-1 -1 Z"
-                    fill="var(--brand)"
-                    initial={{ opacity: 0, x: 0 }}
-                    animate={{ opacity: [0, 1, 0.6], x: k ? 26 : -26 }}
-                    transition={{ duration: 0.6 }}
-                  />
-                ))}
-            </motion.g>
+            </g>
           );
         })}
       </motion.svg>

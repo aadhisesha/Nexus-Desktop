@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>NSDownloadsFolderUsageDescription</key>
+    <string>Nexus requires access to your Downloads folder to index and search your documents.</string>
+    <key>NSDocumentsFolderUsageDescription</key>
+    <string>Nexus requires access to your Documents folder to index and search your documents.</string>
+    <key>NSDesktopFolderUsageDescription</key>
+    <string>Nexus requires access to your Desktop folder to index and search your documents.</string>
+</dict>
+</plist>

@@ -45,6 +45,6 @@ def index_file(file_path: str, captioning_provider: CaptioningProvider | None = 
     if parser_fn is None:
         raise ValueError(f"Unsupported file type: '{ext}'")
 
-    if ext in IMAGE_EXTENSIONS:
+    if ext in IMAGE_EXTENSIONS or ext == ".pdf":
         return parser_fn(file_path, captioning_provider=captioning_provider)
     return parser_fn(file_path)

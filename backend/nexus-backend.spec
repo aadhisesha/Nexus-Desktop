@@ -32,10 +32,9 @@ hiddenimports = [
     "chromadb.segment.impl.vector.local_persistent_hnsw",
     "chromadb.segment.impl.metadata.sqlite",
     "cryptography",
-    "keyring",
-    "keyring.backends",
     "rank_bm25",
     "pypdf",
+    "pypdfium2",
     "docx",
     "openpyxl",
     "pptx",
@@ -48,8 +47,9 @@ hiddenimports = [
 
 # Collect hidden modules and data files for complex packages
 hiddenimports += collect_submodules("chromadb")
-hiddenimports += collect_submodules("keyring")
+hiddenimports += collect_submodules("pypdfium2")
 datas += collect_data_files("chromadb")
+datas += collect_data_files("pypdfium2")
 
 a = Analysis(
     [str(backend_dir / "main.py")],

@@ -8,10 +8,13 @@ changing this function.
 """
 
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from embeddings.base import CaptioningProvider, EmbeddingProvider
-from storage.chroma_client import ChromaClient
 from storage.metadata_db import MetadataDB
+
+if TYPE_CHECKING:
+    from storage.chroma_client import ChromaClient
 
 from . import index_file
 
@@ -28,6 +31,17 @@ def index_path(
     (0 if the file produced no usable text).
     """
     path = Path(file_path)
+    if not path.exists():
+        metadata_db.delete_file_by_path(str(path))
+        chroma_client.delete_by_file_path(str(path))
+        return 0
+
+    mtime = path.stat().st_mtime
+    existing = metadata_db.get_file(str(path))
+    if existing and existing.get("status") == "indexed":
+        if abs(existing.get("last_modified", 0.0) - mtime) < 1e-4:
+            # File has not changed since last successful indexing
+            return 1
 
     chunks = index_file(str(path), captioning_provider=captioning_provider)
     if not chunks:
@@ -36,21 +50,29 @@ def index_path(
     file_id = metadata_db.upsert_file(
         path=str(path),
         file_type=path.suffix.lower().lstrip("."),
-        last_modified=path.stat().st_mtime,
+        last_modified=mtime,
     )
 
-    embeddings = embedding_provider.embed_batch(chunks)
+    try:
+        embeddings = embedding_provider.embed_batch(chunks)
 
-    chunk_ids = [f"{file_id}-{i}" for i in range(len(chunks))]
-    metadatas = [
-        {"file_path": str(path), "snippet": chunk[:300]}
-        for chunk in chunks
-    ]
+        chunk_ids = [f"{file_id}-{i}" for i in range(len(chunks))]
+        metadatas = [
+            {"file_path": str(path), "snippet": chunk[:300]}
+            for chunk in chunks
+        ]
 
-    chroma_client.upsert(ids=chunk_ids, embeddings=embeddings, metadatas=metadatas)
+        # Purge any previous chunks for this file from vector DB and metadata DB
+        chroma_client.delete_by_file_path(str(path))
+        metadata_db.clear_file_chunks(file_id)
 
-    for i, (chunk_id, chunk) in enumerate(zip(chunk_ids, chunks)):
-        metadata_db.add_chunk(chunk_id=chunk_id, file_id=file_id, chunk_index=i, text=chunk)
+        chroma_client.upsert(ids=chunk_ids, embeddings=embeddings, metadatas=metadatas)
 
-    metadata_db.mark_indexed(file_id)
-    return len(chunks)
+        for i, (chunk_id, chunk) in enumerate(zip(chunk_ids, chunks)):
+            metadata_db.add_chunk(chunk_id=chunk_id, file_id=file_id, chunk_index=i, text=chunk)
+
+        metadata_db.mark_indexed(file_id)
+        return len(chunks)
+    except Exception:
+        metadata_db.mark_error(file_id)
+        raise

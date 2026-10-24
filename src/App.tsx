@@ -14,15 +14,14 @@ import { RecentSearches } from "@/components/RecentSearches";
 import { SearchEyes, type SearchEyeState } from "@/components/SearchEyes";
 import { SemanticFileGraph } from "@/components/SemanticFileGraph";
 import type { SearchPhase } from "@/components/SemanticSearchAnimation";
-import { searchFiles } from "@/services/searchService";
-import { initializeNexus, loadIndexedFiles } from "@/services/nexusService";
+import { searchFiles, getSavedProvider, getSavedApiKey } from "@/services/searchService";
+import { initializeNexus, loadIndexedFiles, addConfiguredFolder, removeConfiguredFolder, getConfiguredFolders } from "@/services/nexusService";
 import { api } from "@/api/client";
+import { open, message, confirm } from "@tauri-apps/plugin-dialog";
 import type { FileResult, IndexedFolder, IndexingStatus } from "@/types";
 
-// Boot animation timeline:
-// 300ms eyes pop in -> 900ms wink -> 1700ms text phase -> 2540ms NEXUS typed -> 2700ms wordmark
-// Give 600ms of hold after wordmark appears before the overlay lifts.
-const BOOT_MIN_MS = 3300;
+// Quick, responsive boot overlay
+const BOOT_MIN_MS = 600;
 
 export default function App() {
   const inputRef = useRef<HTMLInputElement>(null);
@@ -35,12 +34,42 @@ export default function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [recentSearches, setRecentSearches] = useState<string[]>([]);
-  const [folders, setFolders] = useState<IndexedFolder[]>([]);
-  const [indexing, setIndexing] = useState<IndexingStatus>({
-    processed: 0,
-    total: 0,
-    currentFolder: "",
-    done: true,
+  const [folders, setFolders] = useState<IndexedFolder[]>(() => {
+    try {
+      const configured = getConfiguredFolders();
+      const cachedCounts = JSON.parse(localStorage.getItem("nexus_folder_counts") || "{}");
+      return configured.map((p) => {
+        const norm = p.replace(/\\/g, "/").replace(/\/+$/, "");
+        return {
+          id: `folder-${norm}`,
+          path: norm,
+          fileCount: cachedCounts[norm] ?? 0,
+        };
+      });
+    } catch {
+      return [];
+    }
+  });
+  const [indexingFolderId, setIndexingFolderId] = useState<string | null>(null);
+  const [indexing, setIndexing] = useState<IndexingStatus>(() => {
+    try {
+      const saved = localStorage.getItem("nexus_last_stats");
+      if (saved) {
+        const stats = JSON.parse(saved);
+        return {
+          processed: stats.indexed_files ?? 0,
+          total: stats.total_files || stats.indexed_files || 0,
+          currentFolder: stats.active_provider ? `Provider: ${stats.active_provider.toUpperCase()}` : "Ready",
+          done: true,
+        };
+      }
+    } catch {}
+    return {
+      processed: 0,
+      total: 0,
+      currentFolder: "",
+      done: true,
+    };
   });
 
   // Boot: run backend health check & load initial state in parallel with visual boot sequence
@@ -52,9 +81,25 @@ export default function App() {
       setRecentSearches(recentSearches);
       setFolders(loadedFolders);
 
+      // Auto-sync saved API key to backend if available
+      const savedProvider = getSavedProvider();
+      const savedKey = getSavedApiKey(savedProvider);
+      if (savedKey) {
+        api.health()
+          .then((h) => {
+            if (!h.provider_configured || h.active_provider !== savedProvider) {
+              return api.saveSettings({ provider: savedProvider, apiKey: savedKey });
+            }
+          })
+          .catch(() => {});
+      }
+
       // Fetch live indexing stats
       api.getStats().then((stats) => {
         if (!cancelled && stats) {
+          try {
+            localStorage.setItem("nexus_last_stats", JSON.stringify(stats));
+          } catch {}
           setIndexing({
             processed: stats.indexed_files,
             total: stats.total_files || stats.indexed_files,
@@ -83,6 +128,9 @@ export default function App() {
     setFolders(loaded);
     const stats = await api.getStats().catch(() => null);
     if (stats) {
+      try {
+        localStorage.setItem("nexus_last_stats", JSON.stringify(stats));
+      } catch {}
       setIndexing({
         processed: stats.indexed_files,
         total: stats.total_files || stats.indexed_files,
@@ -220,15 +268,11 @@ export default function App() {
       />
 
       <div className="relative z-10 flex min-h-0 flex-1 justify-center overflow-y-auto px-5 pb-[30vh]">
-        <motion.div
-          layout
-          transition={{ type: "spring", stiffness: 260, damping: 30 }}
-          className="flex w-full max-w-[640px] flex-col pt-[8vh]"
-        >
+        <div className="flex w-full max-w-[640px] flex-col pt-[8vh]">
           <motion.p
-            initial={{ opacity: 0, y: 10, scale: 0.96, filter: "blur(8px)" }}
-            animate={{ opacity: 1, y: 0, scale: 1, filter: "blur(0px)" }}
-            transition={{ duration: 0.7, delay: 0.3, ease: [0.22, 1, 0.36, 1] }}
+            initial={{ opacity: 0, y: 10, scale: 0.96 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            transition={{ duration: 0.4, delay: 0.2, ease: "easeOut" }}
             className="mb-6 text-center text-[13px] font-medium tracking-[0.35em] text-muted-foreground"
           >
             NEXUS
@@ -262,8 +306,8 @@ export default function App() {
                       <SearchLoadingState />
                     </motion.div>
                   ) : results ? (
-                    <motion.div key="results" initial={{ opacity: 0 }} animate={{ opacity: 1 }}>
-                      <SearchResults results={results} />
+                    <motion.div key="results" initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ duration: 0.15 }}>
+                      <SearchResults results={results} query={query} />
                     </motion.div>
                   ) : (
                     <motion.div key="empty" exit={{ opacity: 0 }}>
@@ -274,7 +318,7 @@ export default function App() {
               </div>
             </>
           )}
-        </motion.div>
+        </div>
       </div>
 
       <div className="pointer-events-none absolute bottom-4 right-5 z-20">
@@ -283,20 +327,6 @@ export default function App() {
         </div>
       </div>
 
-      {/* Settings dim backdrop */}
-      <AnimatePresence>
-        {settingsOpen && (
-          <motion.div
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-            transition={{ duration: 0.25 }}
-            onClick={() => setSettingsOpen(false)}
-            className="fixed inset-0 z-30 bg-background/60"
-          />
-        )}
-      </AnimatePresence>
-
       <SettingsPanel
         open={settingsOpen}
         onClose={() => {
@@ -304,28 +334,118 @@ export default function App() {
           refreshFolders();
         }}
         folders={folders}
+        indexingFolderId={indexingFolderId}
         onAddFolder={async () => {
-          const dir = window.prompt("Enter absolute path to folder or file to index:");
+          let dir: string | null = null;
+          const isTauri = typeof window !== "undefined" && ("__TAURI__" in window || "__TAURI_INTERNALS__" in window);
+
+          if (isTauri) {
+            try {
+              const selected = await open({
+                directory: true,
+                multiple: false,
+                title: "Select Folder to Add",
+              });
+              if (!selected) return; // User cancelled
+              dir = typeof selected === "string" ? selected : selected[0];
+            } catch (err) {
+              console.error("Native folder dialog error:", err);
+              dir = window.prompt("Enter absolute path to folder or file to add:");
+            }
+          } else {
+            dir = window.prompt("Enter absolute path to folder or file to add:");
+          }
+
           if (!dir || !dir.trim()) return;
+
+          addConfiguredFolder(dir.trim());
+          await refreshFolders();
+        }}
+        onIndexFolder={async (folder) => {
+          const isTauri = typeof window !== "undefined" && ("__TAURI__" in window || "__TAURI_INTERNALS__" in window);
           try {
+            setIndexingFolderId(folder.id);
             setIndexing({
               processed: 0,
               total: 100,
-              currentFolder: `Indexing ${dir}`,
+              currentFolder: `Indexing ${folder.path}`,
               done: false,
             });
-            const res = await api.indexDirectory(dir.trim());
-            alert(`Indexing completed: ${res.files_indexed} files indexed (${res.total_chunks_indexed} chunks)`);
-            refreshFolders();
+
+            const res = await api.indexDirectory(folder.path);
+
+            let msg = `Indexing summary for ${folder.path}:\n• Found: ${res.total_files_found} files\n• Successfully indexed: ${res.files_indexed} files (${res.total_chunks_indexed} chunks)`;
+            let kind: "info" | "warning" | "error" = "info";
+
+            if (res.errors && res.errors.length > 0) {
+              kind = res.files_indexed > 0 ? "warning" : "error";
+              const errorSummary = res.errors
+                .slice(0, 3)
+                .map((e) => `• ${e.file_path || "File"}: ${e.error}`)
+                .join("\n");
+              msg += `\n\nIssues encountered (${res.errors.length}):\n${errorSummary}`;
+              if (res.errors.length > 3) {
+                msg += `\n...and ${res.errors.length - 3} more.`;
+              }
+            } else if (res.total_files_found === 0) {
+              kind = "warning";
+              msg += "\n\nNo supported files were found in this directory.\n(Supported formats: PDF, DOCX, XLSX, PPTX, Images, and Code/Text files).";
+            }
+
+            if (isTauri) {
+              await message(msg, {
+                title:
+                  kind === "error"
+                    ? "Indexing Failed"
+                    : kind === "warning"
+                      ? "Indexing Completed with Warnings"
+                      : "Indexing Completed",
+                kind,
+              });
+            } else {
+              alert(msg);
+            }
+
+            await refreshFolders();
           } catch (err: any) {
-            alert(`Indexing error: ${err.message}`);
+            if (isTauri) {
+              await message(`Indexing error for ${folder.path}:\n${err.message}`, {
+                title: "Indexing Error",
+                kind: "error",
+              });
+            } else {
+              alert(`Indexing error: ${err.message}`);
+            }
+          } finally {
+            setIndexingFolderId(null);
           }
         }}
         onRemoveFolder={async (id) => {
           const target = folders.find((f) => f.id === id);
           if (!target) return;
-          if (window.confirm(`Purge index for folder ${target.path}?`)) {
-            refreshFolders();
+          const isTauri = typeof window !== "undefined" && ("__TAURI__" in window || "__TAURI_INTERNALS__" in window);
+          let proceed = false;
+          if (isTauri) {
+            proceed = await confirm(
+              `Remove folder ${target.path}?${target.fileCount > 0 ? " This will also purge its indexed files." : ""}`,
+              {
+                title: "Remove Folder",
+                kind: "warning",
+              }
+            );
+          } else {
+            proceed = window.confirm(`Remove folder ${target.path}?`);
+          }
+          if (proceed) {
+            try {
+              removeConfiguredFolder(target.path);
+              await api.deleteFolder(target.path).catch((err) => {
+                console.warn("Delete folder endpoint returned error:", err);
+              });
+              await refreshFolders();
+            } catch (err: any) {
+              console.error("Failed to delete indexed folder files:", err);
+            }
           }
         }}
       />

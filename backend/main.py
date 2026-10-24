@@ -6,6 +6,22 @@ retrieval into working endpoints. A provider must be configured via
 POST /settings before /index or /search will do anything.
 """
 
+import os
+import sys
+
+# Ensure cwd is a safe, readable directory (e.g. ~/.nexus or /tmp) so that
+# libraries like rich that call os.getcwd() during module import never fail
+# with PermissionError: [Errno 1] Operation not permitted
+try:
+    nexus_home = os.path.expanduser("~/.nexus")
+    os.makedirs(nexus_home, exist_ok=True)
+    os.chdir(nexus_home)
+except Exception:
+    try:
+        os.chdir("/tmp")
+    except Exception:
+        pass
+
 from pathlib import Path
 from typing import Any
 
@@ -21,7 +37,7 @@ from embeddings.anthropic_provider import AnthropicCaptioningProvider
 from indexing.pipeline import index_path
 from indexing.directory import index_directory
 from retrieval import HybridSearcher
-from storage import ChromaClient, MetadataDB
+from storage.metadata_db import MetadataDB
 
 app = FastAPI(title="Nexus Backend", version="0.1.0")
 
@@ -37,22 +53,43 @@ app.add_middleware(
 class AppState:
     """
     Holds everything that needs to survive across requests: the config
-    store, the storage backends (always available), and the
-    provider/searcher pair, which only exist once the user has configured
-    an API key.
+    store, the storage backends, and the provider/searcher pair.
+    Heavy components like ChromaClient and HybridSearcher are lazily
+    initialized on demand to ensure instant app boot times.
     """
 
     def __init__(self) -> None:
         self.config_store = ConfigStore()
-        self.chroma_client = ChromaClient()
+        self._chroma_client: ChromaClient | None = None
         self.metadata_db = MetadataDB()
         self.metadata_db.connect()
 
         self.embedding_provider: EmbeddingProvider | None = None
         self.captioning_provider: CaptioningProvider | None = None
-        self.searcher: HybridSearcher | None = None
+        self._searcher: HybridSearcher | None = None
 
         self._restore_provider_from_disk()
+
+    @property
+    def chroma_client(self):
+        if self._chroma_client is None:
+            from storage.chroma_client import ChromaClient
+            self._chroma_client = ChromaClient()
+        return self._chroma_client
+
+    @property
+    def searcher(self) -> HybridSearcher | None:
+        if self._searcher is None and self.embedding_provider is not None:
+            self._searcher = HybridSearcher(
+                chroma_client=self.chroma_client,
+                metadata_db=self.metadata_db,
+                embedding_provider=self.embedding_provider,
+            )
+        return self._searcher
+
+    @searcher.setter
+    def searcher(self, val: HybridSearcher | None) -> None:
+        self._searcher = val
 
     def _restore_provider_from_disk(self) -> None:
         """On startup, pick back up whatever provider was configured in a
@@ -76,7 +113,6 @@ class AppState:
             self.captioning_provider = GeminiCaptioningProvider(api_key)
         elif provider == "anthropic":
             self.captioning_provider = AnthropicCaptioningProvider(api_key)
-            # Anthropic handles vision captioning. Check if another provider key is saved for embeddings.
             saved_openai = self.config_store.get_provider_key("openai")
             saved_gemini = self.config_store.get_provider_key("gemini")
             if saved_openai:
@@ -90,11 +126,7 @@ class AppState:
         else:
             raise ValueError(f"Provider '{provider}' is not supported.")
 
-        self.searcher = HybridSearcher(
-            chroma_client=self.chroma_client,
-            metadata_db=self.metadata_db,
-            embedding_provider=self.embedding_provider,
-        )
+        self._searcher = None
 
     def configure(self, provider: str, api_key: str) -> None:
         self._init_provider(provider, api_key)
@@ -190,7 +222,7 @@ async def get_settings() -> dict[str, Any]:
 async def save_settings(payload: SettingsPayload) -> SettingsResponse:
     try:
         state.configure(payload.provider, payload.api_key)
-    except ValueError as exc:
+    except (ValueError, PermissionError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return SettingsResponse(provider=payload.provider, saved=True)
 
@@ -215,7 +247,7 @@ async def index_one(request: IndexRequest) -> IndexResponse:
             metadata_db=state.metadata_db,
             captioning_provider=state.captioning_provider,
         )
-    except ValueError as exc:
+    except (ValueError, PermissionError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     assert state.searcher is not None
@@ -244,7 +276,7 @@ async def index_dir(request: IndexDirectoryRequest) -> IndexDirectoryResponse:
             metadata_db=state.metadata_db,
             captioning_provider=state.captioning_provider,
         )
-    except ValueError as exc:
+    except (ValueError, PermissionError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     assert state.searcher is not None
@@ -289,6 +321,20 @@ async def delete_file(file_id: int) -> dict[str, Any]:
     return {"deleted": True, "file_id": file_id, "path": file_path}
 
 
+@app.delete("/folders")
+async def delete_folder(path: str = Query(...)) -> dict[str, Any]:
+    norm_path = path.replace("\\", "/").rstrip("/")
+    files = state.metadata_db.get_files_under_dir(norm_path)
+    count = 0
+    for f in files:
+        state.metadata_db.delete_file_by_id(f["id"])
+        state.chroma_client.delete_by_file_path(f["path"])
+        count += 1
+    if state._searcher:
+        state._searcher.refresh_index()
+    return {"deleted_files": count, "folder": norm_path}
+
+
 @app.post("/clear")
 async def clear_all() -> dict[str, bool]:
     state.metadata_db.delete_all()
@@ -301,7 +347,7 @@ async def clear_all() -> dict[str, bool]:
 @app.get("/stats")
 async def get_stats() -> dict[str, Any]:
     db_stats = state.metadata_db.get_stats()
-    chroma_count = state.chroma_client.count()
+    chroma_count = state._chroma_client.count() if state._chroma_client else db_stats["total_chunks"]
     return {
         **db_stats,
         "chroma_vectors": chroma_count,

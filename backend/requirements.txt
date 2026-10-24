@@ -12,6 +12,7 @@ anthropic>=0.36.0
 
 # --- Document & Image Parsers ---
 pypdf>=5.1.0
+pypdfium2>=4.30.0
 python-docx>=1.1.2
 openpyxl>=3.1.5
 python-pptx>=1.0.1

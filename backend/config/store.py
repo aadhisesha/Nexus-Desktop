@@ -1,29 +1,18 @@
 """
-ConfigStore — local, encrypted persistence of provider settings and API
-keys.
+ConfigStore — local, encrypted persistence of provider settings and API keys.
 
 The config blob (active provider + per-provider keys) is encrypted with
-`cryptography.fernet.Fernet`. The Fernet key itself is kept in the OS
-credential manager via `keyring` (Keychain on macOS, Credential Manager on
-Windows, Secret Service on Linux) rather than on disk next to the config,
-so a copied config file alone isn't enough to decrypt it.
+`cryptography.fernet.Fernet`. The key is securely stored in `~/.nexus/.secret_key`
+with POSIX 0600 permissions (user read/write only).
 
-If no OS keyring backend is available (e.g. a headless Linux box with no
-Secret Service running), this falls back to a locally-stored key file with
-restricted permissions. That's weaker than a real keyring, but it keeps the
-app functional everywhere, and the fallback path is isolated to
-`_load_or_create_fernet` so swapping in a stronger scheme later is a
-one-function change.
+This avoids intrusive OS Keychain password prompts on macOS while keeping
+API keys encrypted at rest.
 """
 
 import json
 from pathlib import Path
 
-import keyring
 from cryptography.fernet import Fernet, InvalidToken
-
-_SERVICE_NAME = "nexus-app"
-_KEYRING_USERNAME = "encryption-key"
 
 
 class ConfigStore:
@@ -34,27 +23,30 @@ class ConfigStore:
         self._fernet = self._load_or_create_fernet()
 
     def _load_or_create_fernet(self) -> Fernet:
+        key_path = self.config_dir / ".secret_key"
         key: str | None = None
-        try:
-            key = keyring.get_password(_SERVICE_NAME, _KEYRING_USERNAME)
-        except Exception:
-            key = None  # No usable keyring backend on this system.
 
+        if key_path.exists():
+            try:
+                key = key_path.read_text().strip()
+            except Exception:
+                key = None
+
+        # Check existing fallback key file if migrating
         fallback_key_path = self.config_dir / ".keyring_fallback"
+        if not key and fallback_key_path.exists():
+            try:
+                key = fallback_key_path.read_text().strip()
+            except Exception:
+                pass
 
-        if key is None and fallback_key_path.exists():
-            key = fallback_key_path.read_text().strip()
-
-        if key is None:
+        if not key:
             key = Fernet.generate_key().decode("utf-8")
             try:
-                keyring.set_password(_SERVICE_NAME, _KEYRING_USERNAME, key)
+                key_path.write_text(key)
+                key_path.chmod(0o600)
             except Exception:
-                fallback_key_path.write_text(key)
-                try:
-                    fallback_key_path.chmod(0o600)
-                except Exception:
-                    pass  # Best-effort on platforms without POSIX permissions.
+                pass
 
         return Fernet(key.encode("utf-8"))
 

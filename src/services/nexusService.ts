@@ -5,6 +5,56 @@
 import { api } from "@/api/client";
 import type { IndexedFolder } from "@/types";
 
+const CONFIGURED_FOLDERS_KEY = "nexus_configured_folders";
+
+export function getConfiguredFolders(): string[] {
+  try {
+    const raw = localStorage.getItem(CONFIGURED_FOLDERS_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) return parsed;
+    }
+  } catch (err) {
+    console.error("Failed to read configured folders:", err);
+  }
+  return [];
+}
+
+export function saveConfiguredFolders(folders: string[]): void {
+  try {
+    localStorage.setItem(CONFIGURED_FOLDERS_KEY, JSON.stringify(folders));
+  } catch (err) {
+    console.error("Failed to save configured folders:", err);
+  }
+}
+
+export function addConfiguredFolder(folderPath: string): string[] {
+  const normalized = folderPath.replace(/\\/g, "/").replace(/\/+$/, "");
+  const current = getConfiguredFolders();
+  if (!current.includes(normalized)) {
+    const updated = [...current, normalized];
+    saveConfiguredFolders(updated);
+    return updated;
+  }
+  return current;
+}
+
+export function removeConfiguredFolder(folderPath: string): string[] {
+  const normalized = folderPath.replace(/\\/g, "/").replace(/\/+$/, "");
+  const current = getConfiguredFolders();
+  const updated = current.filter((p) => p !== normalized);
+  saveConfiguredFolders(updated);
+  try {
+    const rawCounts = localStorage.getItem("nexus_folder_counts");
+    if (rawCounts) {
+      const counts = JSON.parse(rawCounts);
+      delete counts[normalized];
+      localStorage.setItem("nexus_folder_counts", JSON.stringify(counts));
+    }
+  } catch {}
+  return updated;
+}
+
 export async function initializeSearchEngine(): Promise<void> {
   try {
     await api.health();
@@ -15,22 +65,50 @@ export async function initializeSearchEngine(): Promise<void> {
 
 export async function loadIndexedFiles(): Promise<IndexedFolder[]> {
   try {
-    const files = await api.listFiles(200, 0);
-    const folderMap = new Map<string, number>();
+    const configured = getConfiguredFolders();
+    const cachedCounts = (() => {
+      try {
+        return JSON.parse(localStorage.getItem("nexus_folder_counts") || "{}");
+      } catch {
+        return {};
+      }
+    })();
 
-    files.forEach((file) => {
-      const normalized = file.path.replace(/\\/g, "/");
-      const parts = normalized.split("/");
-      parts.pop(); // Remove filename
-      const folderPath = parts.join("/") || "/";
-      folderMap.set(folderPath, (folderMap.get(folderPath) || 0) + 1);
+    let files: any[] = [];
+    try {
+      files = await api.listFiles(500, 0, "indexed");
+    } catch {
+      // Backend might still be starting up, return configured folders with cached counts
+      return configured.map((folderPath) => {
+        const normFolderPath = folderPath.replace(/\\/g, "/").replace(/\/+$/, "");
+        return {
+          id: `folder-${normFolderPath}`,
+          path: normFolderPath,
+          fileCount: cachedCounts[normFolderPath] ?? 0,
+        };
+      });
+    }
+
+    const updatedCounts: Record<string, number> = { ...cachedCounts };
+    const folders: IndexedFolder[] = configured.map((folderPath) => {
+      const normFolderPath = folderPath.replace(/\\/g, "/").replace(/\/+$/, "");
+      const count = files.filter((file) => {
+        const normFilePath = file.path.replace(/\\/g, "/");
+        return normFilePath.startsWith(normFolderPath + "/") || normFilePath === normFolderPath;
+      }).length;
+
+      updatedCounts[normFolderPath] = count;
+
+      return {
+        id: `folder-${normFolderPath}`,
+        path: normFolderPath,
+        fileCount: count,
+      };
     });
 
-    const folders: IndexedFolder[] = Array.from(folderMap.entries()).map(([path, count], idx) => ({
-      id: `folder-${idx}-${path}`,
-      path,
-      fileCount: count,
-    }));
+    try {
+      localStorage.setItem("nexus_folder_counts", JSON.stringify(updatedCounts));
+    } catch {}
 
     return folders;
   } catch (err) {
