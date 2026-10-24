@@ -11,68 +11,83 @@ import type {
   StatsResponse,
 } from "../types";
 
-let currentPort: number | null = null;
-let resolvePortPromise: (port: number) => void;
-const portPromise = new Promise<number>((resolve) => {
-  resolvePortPromise = resolve;
-});
+let cachedPort: number | null = null;
 
 // Check if running inside Tauri environment
 const isTauri = typeof window !== "undefined" && ("__TAURI__" in window || "__TAURI_INTERNALS__" in window);
 
-if (!isTauri) {
-  // Plain browser dev mode — fallback to default port 8000
-  currentPort = 8000;
-  resolvePortPromise!(8000);
-} else {
+if (isTauri) {
   // Listen for backend-ready event from Tauri Rust sidecar launcher
   listen<number>("backend-ready", (event) => {
-    if (event.payload) {
-      currentPort = event.payload;
-      if (resolvePortPromise) resolvePortPromise(event.payload);
+    if (event.payload && typeof event.payload === "number") {
+      console.log("[Client] Backend ready on port:", event.payload);
+      cachedPort = event.payload;
     }
-  }).catch(() => {
-    if (!currentPort) {
-      currentPort = 8000;
-      if (resolvePortPromise) resolvePortPromise(8000);
-    }
+  }).catch((err) => {
+    console.warn("[Client] Failed to register backend-ready listener:", err);
   });
-
-  // Query state in case backend port was assigned before listener mounted
-  invoke<number | null>("get_backend_port")
-    .then((p) => {
-      if (p && !currentPort) {
-        currentPort = p;
-        if (resolvePortPromise) resolvePortPromise(p);
-      }
-    })
-    .catch(() => {
-      // Ignore invoke failure if command not registered
-    });
-
-  // Safety fallback after 5 seconds
-  setTimeout(() => {
-    if (!currentPort) {
-      currentPort = 8000;
-      if (resolvePortPromise) resolvePortPromise(8000);
-    }
-  }, 5000);
 }
 
-async function getBaseUrl(): Promise<string> {
-  if (currentPort) {
-    return `http://127.0.0.1:${currentPort}`;
+/**
+ * Resolves the active backend port with retry/polling in Tauri.
+ * Ensures we never get permanently stuck on a dead port.
+ */
+async function resolvePort(): Promise<number> {
+  if (cachedPort && cachedPort !== 8000) {
+    return cachedPort;
   }
-  const port = await portPromise;
+
+  if (!isTauri) {
+    cachedPort = 8000;
+    return 8000;
+  }
+
+  // Poll Rust get_backend_port up to 40 times (10 seconds total)
+  for (let i = 0; i < 40; i++) {
+    try {
+      const port = await invoke<number | null>("get_backend_port");
+      if (port && port > 0) {
+        cachedPort = port;
+        return port;
+      }
+    } catch (err) {
+      console.warn("[Client] get_backend_port error:", err);
+    }
+    await new Promise((r) => setTimeout(r, 250));
+  }
+
+  if (cachedPort) {
+    return cachedPort;
+  }
+
+  console.warn("[Client] Could not resolve sidecar port after retries, falling back to 8000");
+  return 8000;
+}
+
+export async function getBaseUrl(): Promise<string> {
+  const port = await resolvePort();
   return `http://127.0.0.1:${port}`;
 }
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const baseUrl = await getBaseUrl();
-  const response = await fetch(`${baseUrl}${path}`, {
-    headers: { "Content-Type": "application/json" },
-    ...options,
-  });
+  let response: Response;
+
+  try {
+    response = await fetch(`${baseUrl}${path}`, {
+      headers: { "Content-Type": "application/json" },
+      ...options,
+    });
+  } catch (networkErr: any) {
+    console.warn(`[Client] Request to ${baseUrl}${path} failed:`, networkErr);
+    // Invalidate cached port if the connection refused or dropped
+    cachedPort = null;
+    throw new Error(
+      networkErr?.message?.includes("Load failed")
+        ? "Could not connect to Nexus backend. The local service might still be starting."
+        : (networkErr?.message || "Network request failed")
+    );
+  }
 
   if (!response.ok) {
     let errorDetail = `Request to ${path} failed with status ${response.status}`;
@@ -130,6 +145,11 @@ export const api = {
 
   deleteFile: (fileId: number) =>
     request<{ deleted: boolean; file_id: number; path: string }>(`/files/${fileId}`, {
+      method: "DELETE",
+    }),
+
+  deleteFolder: (folderPath: string) =>
+    request<{ deleted_files: number; folder: string }>(`/folders?path=${encodeURIComponent(folderPath)}`, {
       method: "DELETE",
     }),
 

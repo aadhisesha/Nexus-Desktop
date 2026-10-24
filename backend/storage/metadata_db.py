@@ -119,6 +119,23 @@ class MetadataDB:
         rows = self._conn.execute(query, params).fetchall()
         return [dict(row) for row in rows]
 
+    def clear_file_chunks(self, file_id: int) -> None:
+        assert self._conn is not None
+        self._conn.execute("DELETE FROM chunks WHERE file_id = ?", (file_id,))
+        self._conn.commit()
+
+    def get_files_under_dir(self, dir_path: str) -> list[dict]:
+        """Return all files recorded under dir_path."""
+        assert self._conn is not None
+        norm_dir = dir_path.rstrip("/\\")
+        prefix1 = norm_dir + "/%"
+        prefix2 = norm_dir + "\\%"
+        rows = self._conn.execute(
+            "SELECT id, path FROM files WHERE path = ? OR path LIKE ? OR path LIKE ?",
+            (norm_dir, prefix1, prefix2),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
     def delete_file_by_id(self, file_id: int) -> str | None:
         assert self._conn is not None
         row = self._conn.execute("SELECT path FROM files WHERE id = ?", (file_id,)).fetchone()

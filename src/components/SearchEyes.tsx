@@ -1,5 +1,5 @@
 import { motion, useReducedMotion } from "motion/react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 export type SearchEyeState = "idle" | "searching" | "found" | "no-results" | "error";
 
@@ -25,10 +25,10 @@ function stamp(set: Pattern, cx: number, rows: string[], top: number) {
   });
 }
 
-function both(rows: string[], top: number, dx = 0): Pattern {
+function both(rows: string[], top: number, dx = 0, dy = 0): Pattern {
   const s: Pattern = new Set();
-  stamp(s, LEFT + dx, rows, top);
-  stamp(s, RIGHT + dx, rows, top);
+  stamp(s, LEFT + dx, rows, top + dy);
+  stamp(s, RIGHT + dx, rows, top + dy);
   return s;
 }
 
@@ -56,9 +56,43 @@ type Frame = { p: Pattern; color: string };
  */
 export function SearchEyes({ state }: { state: SearchEyeState }) {
   const reduce = useReducedMotion();
+  const containerRef = useRef<HTMLDivElement>(null);
+  const [lookOffset, setLookOffset] = useState({ dx: 0, dy: 0 });
   const [tick, setTick] = useState(0);
   const [idleVariant, setIdleVariant] = useState<"open" | "half" | "closed" | "squint">("open");
   const [pulse, setPulse] = useState(false);
+
+  // Track cursor position across the app window to orient the eyes
+  useEffect(() => {
+    if (state !== "idle" || reduce) {
+      setLookOffset({ dx: 0, dy: 0 });
+      return undefined;
+    }
+
+    const onMouseMove = (e: MouseEvent) => {
+      if (!containerRef.current) return;
+      const rect = containerRef.current.getBoundingClientRect();
+      const centerX = rect.left + rect.width / 2;
+      const centerY = rect.top + rect.height / 2;
+      const relX = e.clientX - centerX;
+      const relY = e.clientY - centerY;
+
+      // Sensitivity: reach full extent at ~350px horizontal, ~220px vertical
+      const normX = Math.max(-1, Math.min(1, relX / 350));
+      const normY = Math.max(-1, Math.min(1, relY / 220));
+
+      const dx = Math.round(normX * 3);
+      const dy = Math.round(normY * 1);
+
+      setLookOffset((prev) => {
+        if (prev.dx === dx && prev.dy === dy) return prev;
+        return { dx, dy };
+      });
+    };
+
+    window.addEventListener("mousemove", onMouseMove, { passive: true });
+    return () => window.removeEventListener("mousemove", onMouseMove);
+  }, [state, reduce]);
 
   // Idle blink loop
   useEffect(() => {
@@ -127,15 +161,18 @@ export function SearchEyes({ state }: { state: SearchEyeState }) {
       default: {
         const map = { open: [OPEN, 2], half: [HALF, 4], closed: [CLOSED, 5], squint: [SQUINT, 4] } as const;
         const [rows, top] = map[idleVariant];
-        return { p: both([...rows], top), color: "var(--led-idle)" };
+        const curDx = idleVariant === "closed" ? 0 : lookOffset.dx;
+        const curDy = idleVariant === "closed" ? 0 : lookOffset.dy;
+        return { p: both([...rows], top + curDy, curDx), color: "var(--led-idle)" };
       }
     }
-  }, [state, tick, idleVariant]);
+  }, [state, tick, idleVariant, lookOffset]);
 
   const cells = useMemo(() => Array.from({ length: COLS * ROWS }, (_, i) => i), []);
 
   return (
     <motion.div
+      ref={containerRef}
       role="img"
       aria-label={`Nexus status: ${state}`}
       initial={{ opacity: 0, y: 6, scale: 0.96 }}
@@ -165,7 +202,7 @@ export function SearchEyes({ state }: { state: SearchEyeState }) {
                 transition:
                   state === "searching"
                     ? "background 60ms linear, opacity 180ms ease-out, box-shadow 180ms"
-                    : "background 260ms ease, opacity 260ms ease, box-shadow 260ms ease",
+                    : "background 140ms ease, opacity 140ms ease, box-shadow 140ms ease",
               }}
             />
           );

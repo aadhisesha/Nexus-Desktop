@@ -1,9 +1,7 @@
 """
-Storage module — ChromaDB (vector store) and SQLite (metadata store)
-wrappers. Stubbed; no schema or persistence logic implemented yet.
+Storage module — SQLite (metadata store) and ChromaDB (vector store) wrappers.
 """
 
-from .chroma_client import ChromaClient
 from .metadata_db import MetadataDB
 
-__all__ = ["ChromaClient", "MetadataDB"]
+__all__ = ["MetadataDB"]

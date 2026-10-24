@@ -3,6 +3,7 @@ Directory indexing utility — recursively crawls a target folder, identifies
 supported files, and indexes them using the pipeline.
 """
 
+import os
 from pathlib import Path
 from typing import Callable
 
@@ -25,22 +26,45 @@ SUPPORTED_EXTENSIONS = set(_EXTENSION_MAP.keys()).union(IMAGE_EXTENSIONS).union(
 def crawl_directory(dir_path: str) -> list[Path]:
     """
     Find all supported files in dir_path, ignoring common build/dependency
-    directories and hidden folders.
+    directories and hidden folders. Handles OS permissions gracefully.
     """
     root = Path(dir_path)
     if not root.exists() or not root.is_dir():
         raise ValueError(f"Directory path '{dir_path}' does not exist or is not a directory.")
 
-    files: list[Path] = []
+    try:
+        os.listdir(str(root))
+    except PermissionError as exc:
+        raise PermissionError(
+            f"macOS denied permission to access '{dir_path}'. "
+            "Please grant Nexus permission in System Settings > Privacy & Security > Files and Folders, "
+            "or move the folder outside of ~/Downloads (e.g. to ~/Documents or a personal folder)."
+        ) from exc
 
-    for item in root.rglob("*"):
-        if item.is_dir():
-            continue
-        # Skip if any parent directory is in _IGNORE_DIRS or starts with '.'
-        if any(part in _IGNORE_DIRS or (part.startswith(".") and part != ".") for part in item.parts[:-1]):
-            continue
-        if item.suffix.lower() in SUPPORTED_EXTENSIONS:
-            files.append(item)
+    files: list[Path] = []
+    crawl_errors: list[str] = []
+
+    def on_walk_error(err: OSError) -> None:
+        crawl_errors.append(f"{err.filename or dir_path}: {err.strerror}")
+
+    for dirpath, dirnames, filenames in os.walk(str(root), onerror=on_walk_error):
+        # Prune ignored and hidden directories in-place
+        dirnames[:] = [
+            d for d in dirnames
+            if d not in _IGNORE_DIRS and not (d.startswith(".") and d != ".")
+        ]
+
+        for fname in filenames:
+            if fname.startswith("."):
+                continue
+            item = Path(dirpath) / fname
+            if item.suffix.lower() in SUPPORTED_EXTENSIONS:
+                files.append(item)
+
+    if not files and crawl_errors:
+        raise PermissionError(
+            f"macOS denied permission to scan files in '{dir_path}': {'; '.join(crawl_errors)}"
+        )
 
     return sorted(files)
 
@@ -54,9 +78,19 @@ def index_directory(
     progress_callback: Callable[[str, int, int], None] | None = None,
 ) -> dict:
     """
-    Index all supported files inside a directory.
+    Index all supported files inside a directory and prune removed files.
     """
     files = crawl_directory(dir_path)
+    current_file_paths = {str(f.resolve()) for f in files} | {str(f) for f in files}
+
+    # Reconcile: prune files that were removed from this directory
+    existing_records = metadata_db.get_files_under_dir(dir_path)
+    for record in existing_records:
+        rec_path = record["path"]
+        if rec_path not in current_file_paths and not Path(rec_path).exists():
+            metadata_db.delete_file_by_id(record["id"])
+            chroma_client.delete_by_file_path(rec_path)
+
     total_files = len(files)
     indexed_files = 0
     total_chunks = 0

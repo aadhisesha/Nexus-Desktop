@@ -1,8 +1,14 @@
 import { motion, AnimatePresence } from "motion/react";
-import { Check, Eye, EyeOff, Loader2, X, AlertCircle } from "lucide-react";
-import { useState } from "react";
+import { Check, Eye, EyeOff, Loader2, X, AlertCircle, KeyRound } from "lucide-react";
+import { useState, useEffect } from "react";
 import type { AiProvider, IndexedFolder } from "@/types";
-import { testConnection } from "@/services/searchService";
+import {
+  testConnection,
+  getSavedProvider,
+  saveActiveProvider,
+  getSavedApiKey,
+  saveApiKey,
+} from "@/services/searchService";
 import { FolderList } from "./FolderList";
 
 const providers: Array<{ id: AiProvider; label: string }> = [
@@ -17,21 +23,61 @@ interface Props {
   folders: IndexedFolder[];
   onAddFolder: () => void;
   onRemoveFolder: (id: string) => void;
+  onIndexFolder: (folder: IndexedFolder) => void;
+  indexingFolderId?: string | null;
 }
 
 type TestState = { kind: "idle" } | { kind: "loading" } | { kind: "ok" | "error"; message: string };
 
-export function SettingsPanel({ open, onClose, folders, onAddFolder, onRemoveFolder }: Props) {
-  const [provider, setProvider] = useState<AiProvider>("openai");
-  const [apiKey, setApiKey] = useState("");
+export function SettingsPanel({
+  open,
+  onClose,
+  folders,
+  onAddFolder,
+  onRemoveFolder,
+  onIndexFolder,
+  indexingFolderId,
+}: Props) {
+  const [provider, setProvider] = useState<AiProvider>(() => getSavedProvider());
+  const [apiKey, setApiKey] = useState<string>(() => getSavedApiKey(getSavedProvider()));
   const [visible, setVisible] = useState(false);
   const [test, setTest] = useState<TestState>({ kind: "idle" });
 
+  // When panel opens or re-opens, reload saved provider & key
+  useEffect(() => {
+    if (open) {
+      const p = getSavedProvider();
+      setProvider(p);
+      setApiKey(getSavedApiKey(p));
+      setTest({ kind: "idle" });
+    }
+  }, [open]);
+
+  const handleProviderSelect = (p: AiProvider) => {
+    setProvider(p);
+    saveActiveProvider(p);
+    setApiKey(getSavedApiKey(p));
+    setTest({ kind: "idle" });
+  };
+
+  const handleKeyChange = (val: string) => {
+    setApiKey(val);
+    saveApiKey(provider, val);
+    setTest({ kind: "idle" });
+  };
+
   async function runTest() {
+    if (!apiKey.trim()) {
+      setTest({ kind: "error", message: "Please enter an API key" });
+      return;
+    }
     setTest({ kind: "loading" });
+    saveApiKey(provider, apiKey);
     const res = await testConnection(provider, apiKey);
     setTest({ kind: res.ok ? "ok" : "error", message: res.message });
   }
+
+  const hasSavedKey = Boolean(getSavedApiKey(provider));
 
   return (
     <AnimatePresence>
@@ -41,16 +87,16 @@ export function SettingsPanel({ open, onClose, folders, onAddFolder, onRemoveFol
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
-            transition={{ duration: 0.25 }}
+            transition={{ duration: 0.18 }}
             onClick={onClose}
-            className="fixed inset-0 z-40 bg-black/40 backdrop-blur-[2px]"
+            className="fixed inset-0 z-40 bg-background/70"
           />
           <motion.aside
-            initial={{ x: "100%", opacity: 0.6 }}
-            animate={{ x: 0, opacity: 1 }}
-            exit={{ x: "100%", opacity: 0.6 }}
-            transition={{ type: "spring", stiffness: 260, damping: 30 }}
-            className="fixed right-0 top-0 z-50 flex h-[100dvh] w-full max-w-[400px] flex-col border-l border-border bg-background shadow-panel"
+            initial={{ x: "100%" }}
+            animate={{ x: 0 }}
+            exit={{ x: "100%" }}
+            transition={{ duration: 0.22, ease: [0.16, 1, 0.3, 1] }}
+            className="fixed right-0 top-0 z-50 flex h-[100dvh] w-full max-w-[400px] flex-col border-l border-border bg-background shadow-panel will-change-transform"
           >
             <header className="flex items-center justify-between border-b border-border px-5 py-4">
               <h2 className="text-sm font-semibold text-foreground">Settings</h2>
@@ -73,10 +119,7 @@ export function SettingsPanel({ open, onClose, folders, onAddFolder, onRemoveFol
                   {providers.map((p) => (
                     <button
                       key={p.id}
-                      onClick={() => {
-                        setProvider(p.id);
-                        setTest({ kind: "idle" });
-                      }}
+                      onClick={() => handleProviderSelect(p.id)}
                       className="relative flex-1 rounded-md px-3 py-1.5 text-[13px] font-medium transition-colors"
                     >
                       {provider === p.id && (
@@ -97,18 +140,23 @@ export function SettingsPanel({ open, onClose, folders, onAddFolder, onRemoveFol
               </section>
 
               <section className="space-y-2.5">
-                <h3 className="text-[11px] uppercase tracking-wide text-muted-foreground">
-                  API Key
-                </h3>
+                <div className="flex items-center justify-between">
+                  <h3 className="text-[11px] uppercase tracking-wide text-muted-foreground">
+                    API Key ({provider.toUpperCase()})
+                  </h3>
+                  {hasSavedKey && (
+                    <span className="flex items-center gap-1 font-mono text-[10px] text-success">
+                      <Check className="h-3 w-3" /> Saved
+                    </span>
+                  )}
+                </div>
                 <div className="flex items-center gap-2 rounded-lg border border-border bg-surface px-3 py-2.5 focus-within:border-brand/50">
+                  <KeyRound className="h-4 w-4 shrink-0 text-muted-foreground" />
                   <input
                     type={visible ? "text" : "password"}
                     value={apiKey}
-                    onChange={(e) => {
-                      setApiKey(e.target.value);
-                      setTest({ kind: "idle" });
-                    }}
-                    placeholder="••••••••••••••••••••"
+                    onChange={(e) => handleKeyChange(e.target.value)}
+                    placeholder="Enter your API key..."
                     className="w-full bg-transparent font-mono text-[13px] text-foreground outline-none placeholder:text-muted-foreground"
                   />
                   <motion.button
@@ -137,11 +185,11 @@ export function SettingsPanel({ open, onClose, folders, onAddFolder, onRemoveFol
                   whileTap={{ scale: 0.98 }}
                   transition={{ duration: 0.1 }}
                   onClick={runTest}
-                  disabled={test.kind === "loading"}
-                  className="flex w-full items-center justify-center gap-2 rounded-lg border border-border bg-surface-raised py-2.5 text-[13px] font-medium text-foreground transition-colors hover:border-border-strong disabled:opacity-60"
+                  disabled={test.kind === "loading" || !apiKey.trim()}
+                  className="flex w-full items-center justify-center gap-2 rounded-lg border border-border bg-surface-raised py-2.5 text-[13px] font-medium text-foreground transition-colors hover:border-border-strong disabled:opacity-50"
                 >
                   {test.kind === "loading" && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
-                  Test Connection
+                  Save & Connect
                 </motion.button>
 
                 <AnimatePresence mode="wait">
@@ -170,7 +218,13 @@ export function SettingsPanel({ open, onClose, folders, onAddFolder, onRemoveFol
                 <h3 className="text-[11px] uppercase tracking-wide text-muted-foreground">
                   Indexed Folders
                 </h3>
-                <FolderList folders={folders} onAdd={onAddFolder} onRemove={onRemoveFolder} />
+                <FolderList
+                  folders={folders}
+                  onAdd={onAddFolder}
+                  onRemove={onRemoveFolder}
+                  onIndex={onIndexFolder}
+                  indexingFolderId={indexingFolderId}
+                />
               </section>
             </div>
           </motion.aside>
